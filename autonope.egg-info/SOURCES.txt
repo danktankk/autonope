@@ -1,0 +1,13 @@
+README.md
+pyproject.toml
+autonope/__init__.py
+autonope/config.py
+autonope/init.py
+autonope/main.py
+autonope/notify.py
+autonope.egg-info/PKG-INFO
+autonope.egg-info/SOURCES.txt
+autonope.egg-info/dependency_links.txt
+autonope.egg-info/requires.txt
+autonope.egg-info/top_level.txt
+tests/test_core.py

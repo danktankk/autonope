@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autonope"
+version = "0.1.0"
+description = "Docker breaking-change guard"
+authors = [{ name = "Your Name" }]
+dependencies = [
+    "requests>=2.32",
+    "PyYAML>=6.0",
+    "schedule>=1.2",
+    "apprise>=1.9.0",
+    "docker>=7.1.0",
+    "python-dotenv>=1.0",
+]
+
+[tool.setuptools]
+packages = ["autonope"]

@@ -1,0 +1,26 @@
+check_interval: "24h"
+notify:
+  channels:
+    - type: discord
+      url: "https://discord.com/api/webhooks/XXX"
+    - type: slack
+      url: "https://hooks.slack.com/services/YYY"
+    - type: email
+      smtp_host: smtp.example.com
+      port: 587
+      username: bot@example.com
+      password: "${SMTP_PASS}"
+      to: you@example.com
+    - type: apprise
+      url: "apprises://user:key@service"
+    - type: pushover
+      token: "${PUSHOVER_APP_TOKEN}"
+      user: "${PUSHOVER_USER_KEY}"
+repos:
+  - name: diun
+    repo: crazy-max/diun
+    break_keywords: ["BREAKING CHANGE"]
+    interval: "6h"
+  - name: watchtower
+    repo: containrrr/watchtower
+    break_keywords: ["manual"]
