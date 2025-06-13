@@ -1,17 +1,16 @@
-# .github/workflows/docker.yml
-
-name: build
+name: publish
 
 on:
   push:
     tags:
-      - 'v*'
+      - 'v*.*.*'
 
 jobs:
-  build:
+  build-push:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up QEMU
@@ -20,25 +19,25 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Check secrets
-        run: |
-          echo "Username is: ${{ secrets.DOCKERHUB_USERNAME }}"
-          echo "Token is set: ${{ secrets.DOCKERHUB_TOKEN != '' }}"
-
-      - name: Login to DockerHub
+      #── Docker Hub login ────────────────────────────────────────────────
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          password: ${{ secrets.DOCKERHUB_PASSWORD }}  # <- PAT or password
 
-      - name: Extract tag name
+      # Extract the tag name (v0.1.0 → 0.1.0)
+      - name: Extract version
         id: meta
-        run: echo "::set-output name=version::${GITHUB_REF#refs/tags/}"
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      #── Build & push multi‑arch image ───────────────────────────────────
+      - name: Build and push image
         uses: docker/build-push-action@v5
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ secrets.DOCKERHUB_USERNAME }}/autonope:${{ steps.meta.outputs.version }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/autonope:${{ steps.meta.outputs.version }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/autonope:latest
