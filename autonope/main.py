@@ -123,9 +123,10 @@ def compose_has_autonope() -> bool:
         data = yaml.safe_load(p.read_text())
         for svc in data.get("services", {}).values():
             labels = svc.get("labels", {})
+            # labels can be a list or dict (compose yml variants)
             if isinstance(labels, dict):
                 labels = labels.values()
-            if any(str(l).strip() == "autonope" for l in labels):
+            if any(str(lbl).strip() == "autonope" for lbl in labels):
                 return True
     return False
 
