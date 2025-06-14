@@ -1,4 +1,4 @@
-"""AutoNope core scheduler with immediate run, global defaults, and 404‑auto‑resolve."""
+"""AutoNope core scheduler with immediate run, global defaults, and 404-auto-resolve."""
 from __future__ import annotations
 
 import json
@@ -103,9 +103,21 @@ def init_db() -> sqlite3.Connection:
 # ---------------------------------------------------------------------------
 
 def fetch_releases(repo: str) -> List[dict]:
+    token = (
+        os.getenv("GITHUB_TOKEN")
+        or os.getenv("GH_PAT")
+        or os.getenv("GH_TOKEN")
+    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "autonope",
+    }
+    if token:
+        headers["Authorization"] = f"token {token}"
+
     r = requests.get(
         f"https://api.github.com/repos/{repo}/releases",
-        headers={"Accept": "application/vnd.github+json"},
+        headers=headers,
         timeout=20,
     )
     r.raise_for_status()
