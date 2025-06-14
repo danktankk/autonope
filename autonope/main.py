@@ -1,4 +1,6 @@
-"""AutoNope core scheduler with immediate run, global defaults, and 404-auto-resolve."""
+"""AutoNope core scheduler with immediate run, global defaults, 404-auto-resolve, and
+GitHub-search fallback so you don’t have to hand-label slugs."""
+
 from __future__ import annotations
 
 import json
@@ -15,8 +17,26 @@ import requests
 import schedule
 import yaml
 
-DB_PATH = os.getenv("AUTONOPE_DB", "db/autonope.db")
+DB_PATH     = os.getenv("AUTONOPE_DB", "db/autonope.db")
 CONFIG_PATH = os.getenv("AUTONOPE_CONFIG", "config/config.yml")
+
+# ---------------------------------------------------------------------------
+# Common helpers
+# ---------------------------------------------------------------------------
+def gh_headers() -> dict:
+    tok = (
+        os.getenv("GITHUB_TOKEN")
+        or os.getenv("GH_PAT")
+        or os.getenv("GH_TOKEN")
+    )
+    h = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "autonope",
+    }
+    if tok:
+        h["Authorization"] = f"token {tok}"
+    return h
+
 
 # ---------------------------------------------------------------------------
 # Resolver helpers
@@ -30,15 +50,17 @@ GITHUB_RE = re.compile(r"github.com[:/](?P<owner>[^/]+)/(?P<repo>[^/.]+)")
 
 
 def resolve_repo(image: str) -> Optional[str]:
-    """Return <owner>/<repo> via labels or Docker Hub API, or None."""
+    """Return <owner>/<repo> via labels, Hub API, or GitHub search."""
     if "/" not in image:
         return None
     owner, img = image.split("/", 1)
 
-    # 1) OCI labels
+    # 1) OCI labels from local image
     try:
-        inspect = subprocess.check_output(["docker", "image", "inspect", image], text=True)
-        labels = json.loads(inspect)[0]["Config"].get("Labels", {})
+        inspect = subprocess.check_output(
+            ["docker", "image", "inspect", image], text=True
+        )
+        labels = json.loads(inspect)[0]["Config"].get("Labels", {}) or {}
         for key in LABEL_KEYS:
             val = labels.get(key, "")
             m = GITHUB_RE.search(val)
@@ -47,25 +69,57 @@ def resolve_repo(image: str) -> Optional[str]:
     except Exception:
         pass
 
-    # 2) Docker Hub API
+    # 2) Docker Hub API “source_repository” pointer
     try:
         data = requests.get(
-            f"https://hub.docker.com/v2/repositories/{owner}/{img}/", timeout=10
+            f"https://hub.docker.com/v2/repositories/{owner}/{img}/",
+            timeout=10,
         ).json()
-        src = data.get("source_repository", {})
+        src = (data or {}).get("source_repository", {})
         if src and src.get("provider") == "github":
             return src.get("full_name")
     except Exception:
         pass
+
+    # 3) Heuristics + GitHub search: try common naming quirks
+    candidates = {
+        f"{owner}/{img}",
+        f"{owner}/docker-{img}",
+        f"{owner}/{img.replace('-', '_')}",
+        f"{owner}/{img.replace('_', '-')}",
+    }
+    for cand in candidates:
+        r = requests.get(
+            f"https://api.github.com/repos/{cand}",
+            headers=gh_headers(),
+            timeout=10,
+        )
+        if r.status_code == 200:
+            return cand
+
+    # 4) Last-ditch: GitHub search inside the owner’s namespace
+    try:
+        r = requests.get(
+            "https://api.github.com/search/repositories",
+            headers=gh_headers(),
+            params={"q": f"{img} in:name user:{owner}", "per_page": 1},
+            timeout=20,
+        )
+        if r.status_code == 200 and r.json().get("items"):
+            repo_name = r.json()["items"][0]["full_name"]
+            return repo_name
+    except Exception:
+        pass
+
     return None
+
 
 # ---------------------------------------------------------------------------
 # Configuration helpers
 # ---------------------------------------------------------------------------
-
 def load_config() -> dict:
     with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
-        return yaml.safe_load(fh)
+        return yaml.safe_load(fh) or {}
 
 
 def merge_repo_cfg(repo_cfg: Dict, global_cfg: Dict) -> Dict:
@@ -75,16 +129,14 @@ def merge_repo_cfg(repo_cfg: Dict, global_cfg: Dict) -> Dict:
         "interval": repo_cfg.get("interval", global_cfg.get("check_interval", "24h")),
         "break_keywords": [
             k.lower()
-            for k in repo_cfg.get(
-                "break_keywords", global_cfg.get("break_keywords", [])
-            )
+            for k in repo_cfg.get("break_keywords", global_cfg.get("break_keywords", []))
         ],
     }
+
 
 # ---------------------------------------------------------------------------
 # DB helpers
 # ---------------------------------------------------------------------------
-
 def init_db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH)
     con.execute(
@@ -98,61 +150,48 @@ def init_db() -> sqlite3.Connection:
     con.commit()
     return con
 
+
 # ---------------------------------------------------------------------------
 # GitHub helpers
 # ---------------------------------------------------------------------------
-
 def fetch_releases(repo: str) -> List[dict]:
-    token = (
-        os.getenv("GITHUB_TOKEN")
-        or os.getenv("GH_PAT")
-        or os.getenv("GH_TOKEN")
-    )
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "autonope",
-    }
-    if token:
-        headers["Authorization"] = f"token {token}"
-
     r = requests.get(
         f"https://api.github.com/repos/{repo}/releases",
-        headers=headers,
+        headers=gh_headers(),
         timeout=20,
     )
     r.raise_for_status()
     return r.json()
 
+
 # ---------------------------------------------------------------------------
 # Compose label helper
 # ---------------------------------------------------------------------------
-
 def compose_has_autonope() -> bool:
     for fname in ("docker-compose.yml", "docker-compose.yaml"):
         p = pathlib.Path(fname)
         if not p.exists():
             continue
-        data = yaml.safe_load(p.read_text())
+        data = yaml.safe_load(p.read_text()) or {}
         for svc in data.get("services", {}).values():
             labels = svc.get("labels", {})
-            # labels can be a list or dict (compose yml variants)
             if isinstance(labels, dict):
                 labels = labels.values()
             if any(str(lbl).strip() == "autonope" for lbl in labels):
                 return True
     return False
 
+
 # ---------------------------------------------------------------------------
 # Notify (stub)
 # ---------------------------------------------------------------------------
-
 def send_notification(title: str, body: str) -> None:
     logging.warning("%s — %s", title, body)
+
 
 # ---------------------------------------------------------------------------
 # Core check
 # ---------------------------------------------------------------------------
-
 def check_repo(repo: Dict, con: sqlite3.Connection) -> None:
     cur = con.cursor()
     cur.execute("SELECT last_release_id FROM checks WHERE repo=?", (repo["repo"],))
@@ -162,10 +201,10 @@ def check_repo(repo: Dict, con: sqlite3.Connection) -> None:
     try:
         releases = fetch_releases(repo["repo"])
     except requests.HTTPError as err:
-        if err.response.status_code == 404:
+        if err.response.status_code in (403, 404):
             corrected = resolve_repo(repo["repo"])
             if corrected:
-                logging.warning("Resolved %s ➞ %s", repo["repo"], corrected)
+                logging.warning("Resolved %s -> %s", repo["repo"], corrected)
                 repo["repo"] = corrected
                 releases = fetch_releases(corrected)
             else:
@@ -193,10 +232,10 @@ def check_repo(repo: Dict, con: sqlite3.Connection) -> None:
     )
     con.commit()
 
+
 # ---------------------------------------------------------------------------
 # Entry
 # ---------------------------------------------------------------------------
-
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config()
@@ -204,7 +243,9 @@ def main() -> None:
 
     for repo_cfg in cfg.get("repos", []):
         eff = merge_repo_cfg(repo_cfg, cfg)
-        hrs = int(eff["interval"].rstrip("hdw")) * {"h": 1, "d": 24, "w": 168}[eff["interval"][-1]]
+        hrs = int(eff["interval"].rstrip("hdw")) * {"h": 1, "d": 24, "w": 168}[
+            eff["interval"][-1]
+        ]
         schedule.every(hrs).hours.do(check_repo, eff, con)
         logging.info("Scheduled %s every %s", eff["name"], eff["interval"])
         check_repo(eff, con)  # immediate run
