@@ -1,6 +1,8 @@
-"""AutoNope core scheduler – now with selectable log levels (OFF, ERROR, INFO, DEBUG, TRACE)
-and the smarter auto-resolver/search stack."""
+"""AutoNope core scheduler – selectable log levels (OFF, ERROR, INFO, DEBUG, TRACE)
+plus an aggressive GitHub-repo auto-resolver so you rarely have to label images.
 
+Save as /app/autonope/main.py, rebuild your image with --no-cache, and run.
+"""
 from __future__ import annotations
 
 import json
@@ -17,25 +19,30 @@ import requests
 import schedule
 import yaml
 
-# ---------------------------------------------------------------------------
-# Configuration constants
-# ---------------------------------------------------------------------------
-DB_PATH     = os.getenv("AUTONOPE_DB", "db/autonope.db")
-CONFIG_PATH = os.getenv("AUTONOPE_CONFIG", "config/config.yml")
+###############################################################################
+# Config paths
+###############################################################################
+DB_PATH: str = os.getenv("AUTONOPE_DB", "db/autonope.db")
+CONFIG_PATH: str = os.getenv("AUTONOPE_CONFIG", "config/config.yml")
 
-# ---------------------------------------------------------------------------
-# Logging setup
-# ---------------------------------------------------------------------------
+###############################################################################
+# Logging helpers – adds TRACE level + module-level logging.trace()
+###############################################################################
 TRACE = 5
 logging.addLevelName(TRACE, "TRACE")
 
 
-def _trace(self, msg, *args, **kwargs):
+def _trace(self: logging.Logger, msg: str, *args, **kwargs) -> None:  # noqa: D401
     if self.isEnabledFor(TRACE):
         self._log(TRACE, msg, args, **kwargs)
 
 
+def _root_trace(msg: str, *args, **kwargs) -> None:
+    logging.log(TRACE, msg, *args, **kwargs)
+
+
 logging.Logger.trace = _trace  # type: ignore[attr-defined]
+logging.trace = _root_trace    # type: ignore[attr-defined]
 
 _LEVEL_MAP = {
     "OFF": logging.CRITICAL + 1,
@@ -47,47 +54,32 @@ _LEVEL_MAP = {
 
 
 def configure_logging(cfg: dict) -> None:
-    level_str = (
-        os.getenv("AUTONOPE_LOG_LEVEL")
-        or str(cfg.get("log_level", "INFO"))
-    ).upper()
-    lvl = _LEVEL_MAP.get(level_str, logging.INFO)
+    lvl_str = (os.getenv("AUTONOPE_LOG_LEVEL") or cfg.get("log_level", "INFO")).upper()
+    lvl = _LEVEL_MAP.get(lvl_str, logging.INFO)
     logging.basicConfig(level=lvl, format="%(asctime)s %(levelname)s %(message)s")
-    logging.debug("Log level set to %s (%s)", level_str, lvl)
+    logging.debug("Log level set to %s (%s)", lvl_str, lvl)
 
-
-# ---------------------------------------------------------------------------
+###############################################################################
 # GitHub helpers
-# ---------------------------------------------------------------------------
+###############################################################################
+
 def gh_headers() -> dict:
-    tok = (
-        os.getenv("GITHUB_TOKEN")
-        or os.getenv("GH_PAT")
-        or os.getenv("GH_TOKEN")
-    )
-    hdr = {
-        "Accept": "application/vnd.github+json",
-        "User-Agent": "autonope",
-    }
-    if tok:
-        hdr["Authorization"] = f"token {tok}"
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_PAT") or os.getenv("GH_TOKEN")
+    hdr = {"Accept": "application/vnd.github+json", "User-Agent": "autonope"}
+    if token:
+        hdr["Authorization"] = f"token {token}"
     return hdr
 
 
 def fetch_releases(repo: str) -> List[dict]:
     logging.trace("Fetching releases for %s", repo)
-    r = requests.get(
-        f"https://api.github.com/repos/{repo}/releases",
-        headers=gh_headers(),
-        timeout=20,
-    )
+    r = requests.get(f"https://api.github.com/repos/{repo}/releases", headers=gh_headers(), timeout=20)
     r.raise_for_status()
     return r.json()
 
-
-# ---------------------------------------------------------------------------
-# Repo resolver helpers
-# ---------------------------------------------------------------------------
+###############################################################################
+# Image-»repo auto-resolver (labels → Hub API → heuristics → GH search)
+###############################################################################
 LABEL_KEYS = [
     "org.opencontainers.image.source",
     "org.label-schema.vcs-url",
@@ -97,42 +89,36 @@ GITHUB_RE = re.compile(r"github.com[:/](?P<owner>[^/]+)/(?P<repo>[^/.]+)")
 
 
 def resolve_repo(image: str) -> Optional[str]:
-    """Return <owner>/<repo> via labels, Hub API, or GitHub search."""
     if "/" not in image:
         return None
     owner, img = image.split("/", 1)
 
-    # 1) OCI labels from local image
+    # 1) OCI labels from local image (if present)
     try:
-        inspect = subprocess.check_output(
-            ["docker", "image", "inspect", image], text=True
-        )
-        labels = json.loads(inspect)[0]["Config"].get("Labels", {}) or {}
+        insp = subprocess.check_output(["docker", "image", "inspect", image], text=True)
+        labels = json.loads(insp)[0]["Config"].get("Labels", {}) or {}
         for key in LABEL_KEYS:
             m = GITHUB_RE.search(labels.get(key, ""))
             if m:
-                candidate = f"{m['owner']}/{m['repo']}"
-                logging.debug("Label-resolved %s -> %s", image, candidate)
-                return candidate
-    except Exception:
+                cand = f"{m['owner']}/{m['repo']}"
+                logging.debug("Label resolved %s -> %s", image, cand)
+                return cand
+    except Exception:  # noqa: BLE001
         pass
 
-    # 2) Docker Hub “source_repository”
+    # 2) Docker Hub source_repository pointer
     try:
-        r = requests.get(
-            f"https://hub.docker.com/v2/repositories/{owner}/{img}/",
-            timeout=10,
-        )
+        r = requests.get(f"https://hub.docker.com/v2/repositories/{owner}/{img}/", timeout=10)
         if r.ok:
             src = (r.json() or {}).get("source_repository", {})
             if src.get("provider") == "github":
-                candidate = src.get("full_name")
-                logging.debug("Hub-resolved %s -> %s", image, candidate)
-                return candidate
-    except Exception:
+                cand = src.get("full_name")
+                logging.debug("Hub resolved %s -> %s", image, cand)
+                return cand
+    except Exception:  # noqa: BLE001
         pass
 
-    # 3) Heuristic variants + quick existence test
+    # 3) Quick heuristic variants
     variants = {
         f"{owner}/{img}",
         f"{owner}/docker-{img}",
@@ -140,15 +126,11 @@ def resolve_repo(image: str) -> Optional[str]:
         f"{owner}/{img.replace('_', '-')}",
     }
     for cand in variants:
-        if requests.get(
-            f"https://api.github.com/repos/{cand}",
-            headers=gh_headers(),
-            timeout=10,
-        ).status_code == 200:
-            logging.debug("Heuristic-resolved %s -> %s", image, cand)
+        if requests.get(f"https://api.github.com/repos/{cand}", headers=gh_headers(), timeout=10).status_code == 200:
+            logging.debug("Heuristic resolved %s -> %s", image, cand)
             return cand
 
-    # 4) GitHub search (last resort)
+    # 4) GitHub search (last resort, 1 result)
     try:
         r = requests.get(
             "https://api.github.com/search/repositories",
@@ -158,19 +140,19 @@ def resolve_repo(image: str) -> Optional[str]:
         )
         items = (r.json() or {}).get("items", [])
         if items:
-            candidate = items[0]["full_name"]
-            logging.debug("Search-resolved %s -> %s", image, candidate)
-            return candidate
-    except Exception:
+            cand = items[0]["full_name"]
+            logging.debug("Search resolved %s -> %s", image, cand)
+            return cand
+    except Exception:  # noqa: BLE001
         pass
 
     logging.trace("Failed to resolve repo for %s", image)
     return None
 
+###############################################################################
+# YAML + DB helpers
+###############################################################################
 
-# ---------------------------------------------------------------------------
-# YAML config helpers
-# ---------------------------------------------------------------------------
 def load_config() -> dict:
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as fh:
@@ -184,16 +166,10 @@ def merge_repo_cfg(repo_cfg: Dict, global_cfg: Dict) -> Dict:
         "name": repo_cfg["name"],
         "repo": repo_cfg["repo"],
         "interval": repo_cfg.get("interval", global_cfg.get("check_interval", "24h")),
-        "break_keywords": [
-            k.lower()
-            for k in repo_cfg.get("break_keywords", global_cfg.get("break_keywords", []))
-        ],
+        "break_keywords": [k.lower() for k in repo_cfg.get("break_keywords", global_cfg.get("break_keywords", []))],
     }
 
 
-# ---------------------------------------------------------------------------
-# DB helpers
-# ---------------------------------------------------------------------------
 def init_db() -> sqlite3.Connection:
     con = sqlite3.connect(DB_PATH)
     con.execute(
@@ -207,10 +183,10 @@ def init_db() -> sqlite3.Connection:
     con.commit()
     return con
 
+###############################################################################
+# Compose marker helper (for desktop notification integration)
+###############################################################################
 
-# ---------------------------------------------------------------------------
-# Compose-marker helper
-# ---------------------------------------------------------------------------
 def compose_has_autonope() -> bool:
     for fname in ("docker-compose.yml", "docker-compose.yaml"):
         p = pathlib.Path(fname)
@@ -225,23 +201,26 @@ def compose_has_autonope() -> bool:
                 return True
     return False
 
-
-# ---------------------------------------------------------------------------
+###############################################################################
 # Notify (stub)
-# ---------------------------------------------------------------------------
-def send_notification(title: str, body: str) -> None:
+###############################################################################
+
+def send_notification(title: str, body: str) -> None:  # noqa: D401
     logging.warning("%s — %s", title, body)
 
-
-# ---------------------------------------------------------------------------
+###############################################################################
 # Core checker
-# ---------------------------------------------------------------------------
+###############################################################################
+
 def check_repo(repo: Dict, con: sqlite3.Connection) -> None:
     cur = con.cursor()
     cur.execute("SELECT last_release_id FROM checks WHERE repo=?", (repo["repo"],))
     row = cur.fetchone()
     last_seen = row[0] if row else 0
 
+    # ------------------------------------------------------------------
+    # Fetch release list (auto-resolve 403/404 to new repo if possible)
+    # ------------------------------------------------------------------
     try:
         releases = fetch_releases(repo["repo"])
     except requests.HTTPError as err:
@@ -257,11 +236,14 @@ def check_repo(repo: Dict, con: sqlite3.Connection) -> None:
         else:
             raise
 
+    # ------------------------------------------------------------------
+    # Scan new releases for break keywords
+    # ------------------------------------------------------------------
     for rel in releases:
         rid = rel.get("id", 0)
         if rid <= last_seen:
             break
-        blob = f"{rel.get('name')}\n{rel.get('body', '')}".lower()
+        blob = f"{rel.get('name', '')}\n{rel.get('body', '')}".lower()
         if any(k in blob for k in repo["break_keywords"]):
             if compose_has_autonope():
                 send_notification(
@@ -277,23 +259,21 @@ def check_repo(repo: Dict, con: sqlite3.Connection) -> None:
     )
     con.commit()
 
+###############################################################################
+# Entry point
+###############################################################################
 
-# ---------------------------------------------------------------------------
-# Entry
-# ---------------------------------------------------------------------------
-def main() -> None:
+def main() -> None:  # noqa: D401
     cfg = load_config()
     configure_logging(cfg)
     con = init_db()
 
     for repo_cfg in cfg.get("repos", []):
         eff = merge_repo_cfg(repo_cfg, cfg)
-        hrs = int(eff["interval"].rstrip("hdw")) * {"h": 1, "d": 24, "w": 168}[
-            eff["interval"][-1]
-        ]
-        schedule.every(hrs).hours.do(check_repo, eff, con)
+        hours = int(eff["interval"].rstrip("hdw")) * {"h": 1, "d": 24, "w": 168}[eff["interval"][-1]]
+        schedule.every(hours).hours.do(check_repo, eff, con)
         logging.info("Scheduled %s every %s", eff["name"], eff["interval"])
-        check_repo(eff, con)  # immediate
+        check_repo(eff, con)  # immediate first run
 
     logging.info("Initial scan complete; entering loop.")
     while True:
