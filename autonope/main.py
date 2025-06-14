@@ -1,4 +1,4 @@
-"""AutoNope core scheduler with global‑default merging logic."""
+"""AutoNope core scheduler with immediate‑run and global defaults."""
 from __future__ import annotations
 
 import logging
@@ -15,7 +15,6 @@ import yaml
 DB_PATH = os.getenv("AUTONOPE_DB", "db/autonope.db")
 CONFIG_PATH = os.getenv("AUTONOPE_CONFIG", "config/config.yml")
 
-
 # ---------------------------------------------------------------------------
 # Configuration helpers
 # ---------------------------------------------------------------------------
@@ -31,7 +30,12 @@ def merge_repo_cfg(repo_cfg: Dict, global_cfg: Dict) -> Dict:
         "name": repo_cfg["name"],
         "repo": repo_cfg["repo"],
         "interval": repo_cfg.get("interval", global_cfg.get("check_interval", "24h")),
-        "break_keywords": [k.lower() for k in repo_cfg.get("break_keywords", global_cfg.get("break_keywords", []))],
+        "break_keywords": [
+            k.lower()
+            for k in repo_cfg.get(
+                "break_keywords", global_cfg.get("break_keywords", [])
+            )
+        ],
     }
 
 
@@ -87,7 +91,7 @@ def compose_has_autonope() -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Notification plumbing (minimal)
+# Notification plumbing (stub)
 # ---------------------------------------------------------------------------
 
 def send_notification(title: str, body: str) -> None:  # stub for brevity
@@ -104,7 +108,8 @@ def check_repo(repo: Dict, con: sqlite3.Connection) -> None:
     row = cur.fetchone()
     last_seen = row[0] if row else 0
 
-    for rel in fetch_releases(repo["repo"]):
+    releases = fetch_releases(repo["repo"])
+    for rel in releases:
         rid = rel.get("id", 0)
         if rid <= last_seen:
             break
@@ -116,7 +121,7 @@ def check_repo(repo: Dict, con: sqlite3.Connection) -> None:
                 )
             break
 
-    newest = fetch_releases(repo["repo"])[0].get("id", last_seen)
+    newest = releases[0].get("id", last_seen) if releases else last_seen
     cur.execute(
         "INSERT OR REPLACE INTO checks(repo,last_release_id) VALUES (?,?)",
         (repo["repo"], newest),
@@ -129,16 +134,27 @@ def check_repo(repo: Dict, con: sqlite3.Connection) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s"
+    )
     cfg = load_config()
     con = init_db()
 
+    # Register jobs & run an immediate scan
     for repo in cfg.get("repos", []):
         effective = merge_repo_cfg(repo, cfg)
-        hours = int(effective["interval"].rstrip("hdw")) * {"h": 1, "d": 24, "w": 168}[effective["interval"][-1]]
+        hours = int(effective["interval"].rstrip("hdw")) * {
+            "h": 1,
+            "d": 24,
+            "w": 168,
+        }[effective["interval"][-1]]
         schedule.every(hours).hours.do(check_repo, effective, con)
         logging.info("Scheduled %s every %s", effective["name"], effective["interval"])
 
+        # immediate first run
+        check_repo(effective, con)
+
+    logging.info("Initial scan complete; entering scheduler loop.")
     while True:
         schedule.run_pending()
         time.sleep(30)
