@@ -51,7 +51,13 @@ def resolve(image: str, gh_token: str | None = None) -> Optional[str]:
 
     owner, img = image.split("/", 1)
 
-    repo = _from_labels(image)
+# call Hub API first so local pull not required
+    repo = _from_docker_hub(owner, img)
+    if repo:
+        return repo
+
+# then try OCI labels if the image is present locally (non-fatal if not)
+    repo = _from_docker_hub(owner, img)
     if repo:
         return repo
 
