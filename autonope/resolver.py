@@ -1,4 +1,7 @@
-import json, subprocess, re, requests
+import json
+import subprocess
+import re
+import requests
 
 LABEL_KEYS = [
     "org.opencontainers.image.source",
